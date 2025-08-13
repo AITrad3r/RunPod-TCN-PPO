@@ -1,0 +1,70 @@
+{
+  "eval_net_profit": 1757.5199999999459,
+  "eval_total_trades": 18.0,
+  "eval_win_rate": 0.4444444444444444,
+  "eval_profit_factor": 1.760735665219482,
+  "eval_sharpe_ratio": 0.24428205845320275,
+  "eval_sortino_ratio": 0.930102313844025,
+  "eval_calmar_ratio": 126.76563574011507,
+  "eval_max_drawdown": 0.057488288784790814,
+  "eval_trade_frequency": 1.9907834101382489,
+  "eval_avg_win": 508.4762499999979,
+  "eval_avg_loss": -256.698888888893,
+  "eval_sqn": 1.0364010003268094,
+  "eval_episode_return": 0.17575199999999458,
+  "eval_final_balance": 11757.519999999946,
+  "eval_composite_score": 0.7124030447471549,
+  "eval_reward": -0.39996496352633626,
+  "trades": [
+    {
+      "entry_price": 116511.54,
+      "exit_price": 117461.98,
+      "position_type": "long",
+      "pnl": 950.4400000000023,
+      "return_pct": 0.008157475216618049,
+      "quantity": 1.0,
+      "entry_time": "2025-08-07 17:00:00",
+      "exit_time": "2025-08-07 19:00:00"
+    },
+    {
+      "entry_price": 117182.19,
+      "exit_price": 117554.23,
+      "position_type": "long",
+      "pnl": 372.0399999999936,
+      "return_pct": 0.003174885193731177,
+      "quantity": 1.0,
+      "entry_time": "2025-08-07 20:00:00",
+      "exit_time": "2025-08-07 22:00:00"
+    },
+    {
+      "entry_price": 117472.01,
+      "exit_price": 117264.12,
+      "position_type": "long",
+      "pnl": -207.88999999999942,
+      "return_pct": -0.0017696981604383838,
+      "quantity": 1.0,
+      "entry_time": "2025-08-07 23:00:00",
+      "exit_time": "2025-08-08 00:00:00"
+    },
+    {
+      "entry_price": 116888.02,
+      "exit_price": 116700.0,
+      "position_type": "long",
+      "pnl": -188.02000000000407,
+      "return_pct": -0.0016085480787509624,
+      "quantity": 1.0,
+      "entry_time": "2025-08-08 01:00:00",
+      "exit_time": "2025-08-08 02:00:00"
+    },
+    {
+      "entry_price": 116530.63,
+      "exit_price": 116891.51,
+      "position_type": "long",
+      "pnl": 360.8799999999901,
+      "return_pct": 0.003096868179636462,
+      "quantity": 1.0,
+      "entry_time": "2025-08-08 05:00:00",
+      "exit_time": "2025-08-08 11:00:00"
+    }
+  ]
+}

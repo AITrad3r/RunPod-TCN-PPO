@@ -1,0 +1,15 @@
+# This is a template for the .env file.
+# Copy this file to .env and fill in your actual credentials.
+# Do not commit the .env file to version control.
+
+# Binance API credentials
+BINANCE_API_KEY=sZU8MFl0EsmffpDQM4zuUIiicAD9yQ7vvrJvR9wkYblgtAJDDailcsZwkvK90UQY
+BINANCE_API_SECRET=7kWjxOFTIHrDUju4VoLDCAP93c3zWFhG3799SEBxUTg88NcBESY9WHjob7xChRXz
+
+
+# Telegram Bot credentials
+TELEGRAM_BOT_TOKEN=7821614309:AAGMmytTOSgAKbfCCoQGgvHho9OmojcRZso
+TELEGRAM_CHAT_ID=782861190
+
+# Trading Mode
+TRADING_MODE=live

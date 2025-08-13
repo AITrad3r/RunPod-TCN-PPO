@@ -1,0 +1,18 @@
+{
+  "history": [
+    {
+      "round": 1,
+      "train_composite": 0.18839020771513354,
+      "oos_composite": 0.0,
+      "backtest_composite": 0.8944926552698644,
+      "best_model_path": "checkpoints/best_model_episode_0.pt"
+    }
+  ],
+  "final": {
+    "round": 1,
+    "train_composite": 0.18839020771513354,
+    "oos_composite": 0.0,
+    "backtest_composite": 0.8944926552698644,
+    "best_model_path": "checkpoints/best_model_episode_0.pt"
+  }
+}

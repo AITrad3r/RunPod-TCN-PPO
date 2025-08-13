@@ -1,0 +1,102 @@
+[
+  {
+    "entry_price": 118514.0,
+    "exit_price": 118323.16,
+    "position_type": "long",
+    "pnl": -190.8399999999965,
+    "return_pct": -0.0016102738916920912,
+    "quantity": 1.0,
+    "entry_time": "2025-08-10 12:00:00",
+    "exit_time": "2025-08-10 20:00:00"
+  },
+  {
+    "entry_price": 119294.01,
+    "exit_price": 119126.35,
+    "position_type": "long",
+    "pnl": -167.65999999998894,
+    "return_pct": -0.0014054351932673648,
+    "quantity": 1.0,
+    "entry_time": "2025-08-10 23:00:00",
+    "exit_time": "2025-08-11 00:00:00"
+  },
+  {
+    "entry_price": 121876.0,
+    "exit_price": 121728.99,
+    "position_type": "long",
+    "pnl": -147.00999999999476,
+    "return_pct": -0.0012062260001968785,
+    "quantity": 1.0,
+    "entry_time": "2025-08-11 02:00:00",
+    "exit_time": "2025-08-11 03:00:00"
+  },
+  {
+    "entry_price": 122300.63,
+    "exit_price": 121537.15,
+    "position_type": "short",
+    "pnl": 763.4800000000105,
+    "return_pct": 0.006242649772123091,
+    "quantity": 1.0,
+    "entry_time": "2025-08-11 06:00:00",
+    "exit_time": "2025-08-11 07:00:00"
+  },
+  {
+    "entry_price": 121439.75,
+    "exit_price": 120561.54,
+    "position_type": "short",
+    "pnl": 878.2100000000064,
+    "return_pct": 0.007231651909691896,
+    "quantity": 1.0,
+    "entry_time": "2025-08-11 09:00:00",
+    "exit_time": "2025-08-11 11:00:00"
+  },
+  {
+    "entry_price": 119643.7,
+    "exit_price": 120010.0,
+    "position_type": "long",
+    "pnl": 366.3000000000029,
+    "return_pct": 0.0030615903720797913,
+    "quantity": 1.0,
+    "entry_time": "2025-08-11 12:00:00",
+    "exit_time": "2025-08-11 13:00:00"
+  },
+  {
+    "entry_price": 119953.65,
+    "exit_price": 119089.3,
+    "position_type": "long",
+    "pnl": -864.3499999999913,
+    "return_pct": -0.007205699868240702,
+    "quantity": 1.0,
+    "entry_time": "2025-08-11 16:00:00",
+    "exit_time": "2025-08-11 19:00:00"
+  },
+  {
+    "entry_price": 118712.61,
+    "exit_price": 119054.13,
+    "position_type": "long",
+    "pnl": 341.5200000000041,
+    "return_pct": 0.0028768637131304253,
+    "quantity": 1.0,
+    "entry_time": "2025-08-11 21:00:00",
+    "exit_time": "2025-08-12 02:00:00"
+  },
+  {
+    "entry_price": 118857.7,
+    "exit_price": 118449.99,
+    "position_type": "long",
+    "pnl": -407.70999999999185,
+    "return_pct": -0.003430236324613314,
+    "quantity": 1.0,
+    "entry_time": "2025-08-12 03:00:00",
+    "exit_time": "2025-08-12 10:00:00"
+  },
+  {
+    "entry_price": 118522.22,
+    "exit_price": 118542.01,
+    "position_type": "long",
+    "pnl": 19.789999999993597,
+    "return_pct": 0.00016697291022724344,
+    "quantity": 1.0,
+    "entry_time": "2025-08-12 11:00:00",
+    "exit_time": "2025-08-12 12:00:00"
+  }
+]

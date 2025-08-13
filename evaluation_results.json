@@ -1,0 +1,19 @@
+{
+  "eval_net_profit": 0.0,
+  "eval_total_trades": 0.0,
+  "eval_win_rate": 0.0,
+  "eval_profit_factor": 0.0,
+  "eval_sharpe_ratio": 0.0,
+  "eval_sortino_ratio": 0.0,
+  "eval_calmar_ratio": 0.0,
+  "eval_max_drawdown": 0.0,
+  "eval_trade_frequency": 0.0,
+  "eval_avg_win": 0.0,
+  "eval_avg_loss": 0.0,
+  "eval_episode_return": 0.0,
+  "eval_final_balance": 10000.0,
+  "eval_composite_score": 0.0,
+  "eval_reward": 0.0,
+  "model_path": "checkpoints/final_model_episode_500.pt",
+  "evaluation_date": "2025-08-12T18:59:56.330023"
+}
