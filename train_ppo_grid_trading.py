@@ -359,9 +359,17 @@ def evaluate_model(args):
 
 def run_pipeline(args):
     """Run predefined training/testing pipelines"""
-    assert args.mode in {"short", "targeted"}, "Supported modes: 'short', 'targeted'"
+    assert args.mode in {"short", "targeted", "fouryear"}, "Supported modes: 'short', 'targeted', 'fouryear'"
 
     print(f"=== Pipeline: {args.mode} ===")
+    # Device summary
+    try:
+        dev_count = torch.cuda.device_count()
+        has_cuda = torch.cuda.is_available()
+        gpu_name = torch.cuda.get_device_name(0) if has_cuda and dev_count > 0 else 'N/A'
+        print(f"Torch: {torch.__version__} | CUDA available: {has_cuda} | Devices: {dev_count} | GPU: {gpu_name}")
+    except Exception as e:
+        print(f"Torch/CUDA summary unavailable: {e}")
     # Build env kwargs for gating tests (defaults off)
     env_kwargs = {
         'use_vwap_filter': bool(getattr(args, 'use_vwap_filter', False)),
@@ -845,6 +853,142 @@ def run_pipeline(args):
             except Exception as e:
                 print(f"Warning: failed to package targeted run artifacts: {e}")
 
+    if args.mode == 'fouryear':
+        # Fixed split: 2 years train, 1 year OOS, 1 year backtest
+        # Use latest date as end of backtest
+        two_years = 730
+        one_year = 365
+        backtest_days = one_year
+        oos_days = one_year
+        train_days = two_years
+
+        backtest_end = latest
+        backtest_start = backtest_end - timedelta(days=backtest_days)
+        oos_end = backtest_start
+        oos_start = oos_end - timedelta(days=oos_days)
+        train_end = oos_start
+        train_start = train_end - timedelta(days=train_days)
+
+        # Stringify windows
+        train_start_s = train_start.strftime('%Y-%m-%d %H:%M:%S')
+        train_end_s = train_end.strftime('%Y-%m-%d %H:%M:%S')
+        oos_start_s = oos_start.strftime('%Y-%m-%d %H:%M:%S')
+        oos_end_s = oos_end.strftime('%Y-%m-%d %H:%M:%S')
+        backtest_start_s = backtest_start.strftime('%Y-%m-%d %H:%M:%S')
+        backtest_end_s = backtest_end.strftime('%Y-%m-%d %H:%M:%S')
+
+        print("\n=== FourYear Pipeline Dates ===")
+        print(f"Train (2y): {train_start_s} -> {train_end_s}")
+        print(f"OOS (1y):  {oos_start_s} -> {oos_end_s}")
+        print(f"BTest(1y): {backtest_start_s} -> {backtest_end_s}")
+
+        # Config
+        config = create_config(args)
+
+        # Train single model on train, validate on OOS
+        trainer = PPOTrainer(
+            config=config,
+            data_query=data_query,
+            train_start_date=train_start_s,
+            train_end_date=train_end_s,
+            val_start_date=oos_start_s,
+            val_end_date=oos_end_s,
+            env_kwargs=env_kwargs
+        )
+        best_model_path = trainer.train(n_episodes=args.episodes)
+        if not best_model_path:
+            best_model_path = f'checkpoints/final_model_episode_{args.episodes}.pt'
+
+        # Evaluate on OOS
+        print("\nEvaluating on OOS (1y)...")
+        oos_results = trainer.agent.evaluate(trainer.val_env, n_episodes=max(1, args.eval_episodes))
+        # Backtest on final 1y
+        print("Evaluating backtest (1y)...")
+        backtest_results = trainer.backtest(
+            model_path=best_model_path,
+            test_start_date=backtest_start_s,
+            test_end_date=backtest_end_s
+        )
+
+        # Thresholds
+        min_wr = float(getattr(args, 'min_win_rate', 0.55))
+        min_tpd = float(getattr(args, 'min_trades_per_day', 3.0))
+        min_comp = float(getattr(args, 'min_composite', 0.8))
+        bt_wr = float(backtest_results.get('eval_win_rate', backtest_results.get('win_rate', 0.0)))
+        bt_tpd = float(backtest_results.get('eval_trade_frequency', backtest_results.get('trades_per_day', 0.0)))
+        bt_comp = float(backtest_results.get('eval_composite_score', backtest_results.get('composite_score', 0.0)))
+        thresholds_met = (bt_wr >= min_wr) and (bt_tpd >= min_tpd) and (bt_comp >= min_comp)
+
+        # Build report
+        def pick(metrics: dict):
+            return {
+                'win_rate': float(metrics.get('eval_win_rate', 0.0)),
+                'composite_score': float(metrics.get('eval_composite_score', 0.0)),
+                'trades_per_day': float(metrics.get('eval_trade_frequency', 0.0)),
+            }
+
+        report = {
+            'pipeline': 'fouryear',
+            'train_window': [train_start_s, train_end_s],
+            'oos_window': [oos_start_s, oos_end_s],
+            'backtest_window': [backtest_start_s, backtest_end_s],
+            'model_path': best_model_path,
+            'oos': pick(oos_results),
+            'backtest': pick(backtest_results),
+            'thresholds': {
+                'min_win_rate': min_wr,
+                'min_trades_per_day': min_tpd,
+                'min_composite': min_comp
+            },
+            'thresholds_met': bool(thresholds_met),
+            'timestamp': datetime.now().isoformat()
+        }
+
+        print("\n=== Pipeline Results (FourYear) ===")
+        print(f"OOS -> WinRate: {report['oos']['win_rate']:.4f} | Composite: {report['oos']['composite_score']:.4f} | Trades/Day: {report['oos']['trades_per_day']:.4f}")
+        print(f"BTest -> WinRate: {report['backtest']['win_rate']:.4f} | Composite: {report['backtest']['composite_score']:.4f} | Trades/Day: {report['backtest']['trades_per_day']:.4f}")
+        print(f"Thresholds met: {report['thresholds_met']}")
+
+        os.makedirs('results', exist_ok=True)
+        ts_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_path = os.path.join('results', f"pipeline_fouryear_{ts_now}.json")
+        with open(out_path, 'w') as f:
+            json.dump(report, f, indent=2)
+        print(f"\nPipeline report saved to {out_path}")
+
+        # Save artifacts and HTML reports
+        try:
+            import shutil
+            save_dir = os.path.join('results', f"run_fouryear_{ts_now}")
+            os.makedirs(save_dir, exist_ok=True)
+            if best_model_path and os.path.exists(best_model_path):
+                shutil.copy2(best_model_path, os.path.join(save_dir, os.path.basename(best_model_path)))
+            # Reports
+            oos_html = os.path.join(save_dir, 'OOS_report.html')
+            bt_html = os.path.join(save_dir, 'Backtest_report.html')
+            print(f"Generating OOS report -> {oos_html}")
+            generate_report(
+                model_path=best_model_path,
+                start_date=oos_start_s,
+                end_date=oos_end_s,
+                window='oos',
+                use_vwap_filter=bool(getattr(args, 'use_vwap_filter', False)),
+                vwap_longs_only=bool(getattr(args, 'vwap_longs_only', False)),
+                out_html=oos_html,
+            )
+            print(f"Generating Backtest report -> {bt_html}")
+            generate_report(
+                model_path=best_model_path,
+                start_date=backtest_start_s,
+                end_date=backtest_end_s,
+                window='backtest',
+                use_vwap_filter=bool(getattr(args, 'use_vwap_filter', False)),
+                vwap_longs_only=bool(getattr(args, 'vwap_longs_only', False)),
+                out_html=bt_html,
+            )
+        except Exception as e:
+            print(f"Warning: failed to save artifacts/reports for fouryear pipeline: {e}")
+
 def test_system(args):
     """Test system components"""
     print("=== System Component Testing ===")
@@ -1101,7 +1245,7 @@ def main():
     
     # Pipeline command
     pipe_parser = subparsers.add_parser('pipeline', help='Run a training/testing pipeline')
-    pipe_parser.add_argument('--mode', type=str, choices=['short', 'targeted'], required=True, help="Pipeline mode: 'short' or 'targeted'")
+    pipe_parser.add_argument('--mode', type=str, choices=['short', 'targeted', 'fouryear'], required=True, help="Pipeline mode: 'short', 'targeted', or 'fouryear'")
     pipe_parser.add_argument('--episodes', type=int, default=500, help='Training episodes')
     pipe_parser.add_argument('--round-episodes', type=int, help='Episodes per training round (alias for --episodes in targeted mode)')
     pipe_parser.add_argument('--learning-rate', type=float, default=3e-4, help='Learning rate')
@@ -1151,6 +1295,10 @@ def main():
     pipe_parser.add_argument('--max-rounds', type=int, default=10, help='Max training rounds (targeted)')
     pipe_parser.set_defaults(require_backtest_better=True)
     pipe_parser.add_argument('--no-require-backtest-better', dest='require_backtest_better', action='store_false', help='Do not require backtest composite >= train and OOS')
+    # Fouryear threshold enforcement
+    pipe_parser.add_argument('--min-win-rate', type=float, default=0.55, help='Minimum backtest win rate for fouryear mode pass')
+    pipe_parser.add_argument('--min-trades-per-day', type=float, default=3.0, help='Minimum backtest trades/day for fouryear mode pass')
+    pipe_parser.add_argument('--min-composite', type=float, default=0.8, help='Minimum backtest composite score for fouryear mode pass')
     
     # Backtest command
     bt_parser = subparsers.add_parser('backtest', help='Backtest a saved model over a date window')
