@@ -1,0 +1,34 @@
+{
+  "pipeline": "short",
+  "train_window": [
+    "2025-07-13 13:00:00",
+    "2025-07-28 13:00:00"
+  ],
+  "oos_window": [
+    "2025-07-28 13:00:00",
+    "2025-08-05 13:00:00"
+  ],
+  "backtest_window": [
+    "2025-08-05 13:00:00",
+    "2025-08-12 13:00:00"
+  ],
+  "model_path": "checkpoints/best_model_episode_10.pt",
+  "model_paths": [
+    "checkpoints/best_model_episode_10.pt",
+    "checkpoints/best_model_episode_2.pt",
+    "checkpoints/best_model_episode_0.pt",
+    "checkpoints/best_model_episode_6.pt",
+    "checkpoints/best_model_episode_2.pt"
+  ],
+  "oos": {
+    "win_rate": 0.33968253968253964,
+    "composite_score": 0.265450580608133,
+    "trades_per_day": 1.0887573964497042
+  },
+  "backtest": {
+    "win_rate": 0.2857142857142857,
+    "composite_score": 0.5723076437877165,
+    "trades_per_day": 1.1586206896551723
+  },
+  "timestamp": "2025-08-14T07:53:15.130417"
+}

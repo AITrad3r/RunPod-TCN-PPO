@@ -1,0 +1,26 @@
+{
+  "history": [
+    {
+      "round": 1,
+      "train_composite": 0.6275643563700352,
+      "oos_composite": 0.2980813087013012,
+      "backtest_composite": 0.9009595098417662,
+      "backtest_win_rate": 0.52,
+      "backtest_trades_per_day": 3.5502958579881656,
+      "best_model_path": "checkpoints/best_model_episode_0.pt",
+      "oos_trades_file": "results\\oos_trades_20250816_044543.json",
+      "backtest_trades_file": "results\\backtest_trades_20250816_044545.json"
+    }
+  ],
+  "final": {
+    "round": 1,
+    "train_composite": 0.6275643563700352,
+    "oos_composite": 0.2980813087013012,
+    "backtest_composite": 0.9009595098417662,
+    "backtest_win_rate": 0.52,
+    "backtest_trades_per_day": 3.5502958579881656,
+    "best_model_path": "checkpoints/best_model_episode_0.pt",
+    "oos_trades_file": "results\\oos_trades_20250816_044543.json",
+    "backtest_trades_file": "results\\backtest_trades_20250816_044545.json"
+  }
+}

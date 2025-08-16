@@ -1,0 +1,59 @@
+{
+  "history": [
+    {
+      "round": 1,
+      "train_composite": 0.0,
+      "oos_composite": 0.0,
+      "backtest_composite": 0.0,
+      "backtest_win_rate": 0.0,
+      "backtest_trades_per_day": 0.0,
+      "best_model_path": "checkpoints/best_model_episode_0.pt",
+      "oos_trades_file": null,
+      "backtest_trades_file": null
+    },
+    {
+      "round": 2,
+      "train_composite": 0.0,
+      "oos_composite": 0.0,
+      "backtest_composite": 0.0,
+      "backtest_win_rate": 0.0,
+      "backtest_trades_per_day": 0.0,
+      "best_model_path": "checkpoints/best_model_episode_0.pt",
+      "oos_trades_file": null,
+      "backtest_trades_file": null
+    },
+    {
+      "round": 3,
+      "train_composite": 0.0,
+      "oos_composite": 0.0,
+      "backtest_composite": 0.0,
+      "backtest_win_rate": 0.0,
+      "backtest_trades_per_day": 0.0,
+      "best_model_path": "checkpoints/best_model_episode_0.pt",
+      "oos_trades_file": null,
+      "backtest_trades_file": null
+    },
+    {
+      "round": 4,
+      "train_composite": 0.0,
+      "oos_composite": 0.0,
+      "backtest_composite": 0.0,
+      "backtest_win_rate": 0.0,
+      "backtest_trades_per_day": 0.0,
+      "best_model_path": "checkpoints/best_model_episode_0.pt",
+      "oos_trades_file": null,
+      "backtest_trades_file": null
+    },
+    {
+      "round": 5,
+      "train_composite": 0.0,
+      "oos_composite": 0.0,
+      "backtest_composite": 0.0,
+      "backtest_win_rate": 0.0,
+      "backtest_trades_per_day": 0.0,
+      "best_model_path": "checkpoints/best_model_episode_0.pt",
+      "oos_trades_file": null,
+      "backtest_trades_file": null
+    }
+  ]
+}

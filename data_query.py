@@ -9,68 +9,153 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class DataQuery:
-    def __init__(self):
+    def __init__(self,
+                 vwap_window: int = 24,
+                 rsi_period: int = 14,
+                 use_bbands: bool = False,
+                 bb_window: int = 20,
+                 bb_k: float = 2.0):
         self.db_path = os.getenv('DATABASE_PATH', 'bitcoin_data.db')
+        # Indicator configuration
+        self.vwap_window = int(vwap_window)
+        self.rsi_period = int(rsi_period)
+        self.use_bbands = bool(use_bbands)
+        self.bb_window = int(bb_window)
+        self.bb_k = float(bb_k)
         
     def get_data(self, start_date=None, end_date=None, limit=None):
         """Get OHLCV data from database"""
         conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        
+        # Detect if a 'datetime' column exists in the table
+        try:
+            has_datetime = bool(cur.execute("SELECT 1 FROM pragma_table_info('hourly_data') WHERE name='datetime'").fetchone())
+        except Exception:
+            has_datetime = False
         
         query = "SELECT * FROM hourly_data"
         conditions = []
         params = []
+        order_col = 'timestamp'
         
-        if start_date:
-            if isinstance(start_date, str):
-                start_date = datetime.strptime(start_date, '%Y-%m-%d %H:%M:%S')
-            start_ts = int(start_date.timestamp() * 1000)
-            conditions.append("timestamp >= ?")
-            params.append(start_ts)
+        # Prefer filtering by ISO datetime strings to avoid timestamp unit ambiguity
+        if has_datetime and (start_date or end_date):
+            order_col = 'datetime'
+            if start_date:
+                if not isinstance(start_date, str):
+                    start_date = datetime.fromtimestamp(start_date.timestamp()).strftime('%Y-%m-%d %H:%M:%S')
+                conditions.append("datetime >= ?")
+                params.append(start_date)
+            if end_date:
+                if not isinstance(end_date, str):
+                    end_date = datetime.fromtimestamp(end_date.timestamp()).strftime('%Y-%m-%d %H:%M:%S')
+                conditions.append("datetime <= ?")
+                params.append(end_date)
+        else:
+            # Fallback: filter by numeric timestamp, auto-detect unit (s vs ms)
+            ts_unit = 'ms'
+            try:
+                row = cur.execute("SELECT MAX(timestamp) FROM hourly_data").fetchone()
+                max_ts = row[0] if row else None
+                if max_ts is not None and max_ts < 1e11:
+                    ts_unit = 's'  # seconds
+                else:
+                    ts_unit = 'ms'
+            except Exception:
+                ts_unit = 'ms'
             
-        if end_date:
-            if isinstance(end_date, str):
-                end_date = datetime.strptime(end_date, '%Y-%m-%d %H:%M:%S')
-            end_ts = int(end_date.timestamp() * 1000)
-            conditions.append("timestamp <= ?")
-            params.append(end_ts)
-            
+            if start_date:
+                if isinstance(start_date, str):
+                    start_date = datetime.strptime(start_date, '%Y-%m-%d %H:%M:%S')
+                start_ts = int(start_date.timestamp() * (1000 if ts_unit == 'ms' else 1))
+                conditions.append("timestamp >= ?")
+                params.append(start_ts)
+            if end_date:
+                if isinstance(end_date, str):
+                    end_date = datetime.strptime(end_date, '%Y-%m-%d %H:%M:%S')
+                end_ts = int(end_date.timestamp() * (1000 if ts_unit == 'ms' else 1))
+                conditions.append("timestamp <= ?")
+                params.append(end_ts)
+        
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-            
-        query += " ORDER BY timestamp"
         
+        query += f" ORDER BY {order_col}"
         if limit:
             query += f" LIMIT {limit}"
-            
+        
         df = pd.read_sql_query(query, conn, params=params)
+        
+        # Ensure we have a proper pandas datetime column
+        if 'datetime' in df.columns:
+            # Parse if stored as string
+            try:
+                df['datetime'] = pd.to_datetime(df['datetime'])
+            except Exception:
+                # Fallback to timestamp parsing if needed
+                unit_guess = 'ms'
+                try:
+                    row = cur.execute("SELECT MAX(timestamp) FROM hourly_data").fetchone()
+                    max_ts = row[0] if row else None
+                    if max_ts is not None and max_ts < 1e11:
+                        unit_guess = 's'
+                except Exception:
+                    unit_guess = 'ms'
+                if 'timestamp' in df.columns:
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit=unit_guess)
+        elif 'timestamp' in df.columns:
+            # Derive datetime from timestamp with unit detection
+            unit_guess = 'ms'
+            try:
+                row = cur.execute("SELECT MAX(timestamp) FROM hourly_data").fetchone()
+                max_ts = row[0] if row else None
+                if max_ts is not None and max_ts < 1e11:
+                    unit_guess = 's'
+            except Exception:
+                unit_guess = 'ms'
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit=unit_guess)
+        
         conn.close()
-        
-        # Convert timestamp to datetime
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-        
         return df
     
     def get_recent_data(self, hours=96):
         """Get most recent N hours of data (default 96 for PPO model)"""
         conn = sqlite3.connect(self.db_path)
-        
-        query = f"""
-            SELECT * FROM hourly_data 
-            ORDER BY timestamp DESC 
-            LIMIT {hours}
-        """
-        
+        cur = conn.cursor()
+        # Determine order column preference
+        try:
+            has_datetime = bool(cur.execute("SELECT 1 FROM pragma_table_info('hourly_data') WHERE name='datetime'").fetchone())
+        except Exception:
+            has_datetime = False
+        order_col = 'datetime' if has_datetime else 'timestamp'
+        query = f"SELECT * FROM hourly_data ORDER BY {order_col} DESC LIMIT {hours}"
         df = pd.read_sql_query(query, conn)
+        # Determine timestamp unit for parsing if needed
+        unit_guess = 'ms'
+        try:
+            row = cur.execute("SELECT MAX(timestamp) FROM hourly_data").fetchone()
+            max_ts = row[0] if row else None
+            if max_ts is not None and max_ts < 1e11:
+                unit_guess = 's'
+        except Exception:
+            unit_guess = 'ms'
         conn.close()
-        
-        # Convert timestamp and reverse order (oldest first)
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.sort_values('timestamp').reset_index(drop=True)
-        
+        # Ensure datetime column exists
+        if 'datetime' in df.columns:
+            try:
+                df['datetime'] = pd.to_datetime(df['datetime'])
+            except Exception:
+                if 'timestamp' in df.columns:
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit=unit_guess)
+        elif 'timestamp' in df.columns:
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit=unit_guess)
+        # Oldest first
+        df = df.sort_values('datetime').reset_index(drop=True)
         return df
     
     def calculate_indicators(self, df):
-        """Calculate VWAP and RSI indicators as specified in the PPO spec"""
+        """Calculate VWAP, RSI, and optional Bollinger Bands indicators"""
         df = df.copy()
         
         # Calculate VWAP (Volume Weighted Average Price)
@@ -78,15 +163,15 @@ class DataQuery:
         df['vwap_numerator'] = df['typical_price'] * df['volume']
         df['vwap_denominator'] = df['volume']
         
-        # Rolling VWAP calculation (24-hour window)
-        window = 24
-        df['vwap'] = df['vwap_numerator'].rolling(window=window).sum() / df['vwap_denominator'].rolling(window=window).sum()
+        # Rolling VWAP calculation (configurable window)
+        vw = max(1, int(self.vwap_window))
+        df['vwap'] = df['vwap_numerator'].rolling(window=vw).sum() / df['vwap_denominator'].rolling(window=vw).sum()
         
         # Price relative to VWAP
         df['price_minus_vwap'] = df['close_price'] - df['vwap']
         df['above_vwap'] = (df['close_price'] > df['vwap']).astype(int)
         
-        # Calculate RSI(14)
+        # Calculate RSI (configurable period)
         def calculate_rsi(prices, window=14):
             delta = prices.diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -94,9 +179,25 @@ class DataQuery:
             rs = gain / loss
             rsi = 100 - (100 / (1 + rs))
             return rsi
-        
-        df['rsi'] = calculate_rsi(df['close_price'])
+        rp = max(2, int(self.rsi_period))
+        df['rsi'] = calculate_rsi(df['close_price'], window=rp)
         df['rsi_50_cross'] = ((df['rsi'] > 50) & (df['rsi'].shift(1) <= 50)).astype(int)
+
+        # Optional Bollinger Bands
+        if self.use_bbands:
+            w = max(2, int(self.bb_window))
+            k = float(self.bb_k)
+            sma = df['close_price'].rolling(window=w).mean()
+            std = df['close_price'].rolling(window=w).std()
+            upper = sma + k * std
+            lower = sma - k * std
+            width = (upper - lower).replace(0, np.nan)
+            # Store Bollinger band width (normalized by SMA to be scale-invariant)
+            df['bb_width'] = ((upper - lower) / sma).replace([np.inf, -np.inf], np.nan)
+            # %B: normalized position within bands
+            df['bb_pctb'] = ((df['close_price'] - lower) / width).clip(0.0, 1.0)
+        else:
+            df['bb_pctb'] = np.nan  # placeholder for consistency
         
         return df
     
@@ -108,7 +209,9 @@ class DataQuery:
         # Calculate indicators
         df = self.calculate_indicators(df)
         
-        # Select features as specified in PPO spec
+        # Select features
+        # Keep feature count constant (7). Use bb_pctb instead of rsi_50_cross when enabled.
+        use_bb = bool(self.use_bbands)
         features = [
             'close_price',
             'volume', 
@@ -116,7 +219,7 @@ class DataQuery:
             'price_minus_vwap',
             'above_vwap',
             'rsi',
-            'rsi_50_cross'
+            'bb_pctb' if use_bb else 'rsi_50_cross'
         ]
         
         # Remove rows with NaN values (from indicator calculations)
@@ -133,23 +236,58 @@ class DataQuery:
     def get_data_stats(self):
         """Get basic statistics about the data"""
         conn = sqlite3.connect(self.db_path)
-        
-        query = """
-            SELECT 
-                COUNT(*) as total_records,
-                MIN(datetime) as earliest_date,
-                MAX(datetime) as latest_date,
-                MIN(close_price) as min_price,
-                MAX(close_price) as max_price,
-                AVG(close_price) as avg_price,
-                AVG(volume) as avg_volume
-            FROM hourly_data
-        """
-        
-        stats = pd.read_sql_query(query, conn)
-        conn.close()
-        
-        return stats.iloc[0].to_dict()
+        cur = conn.cursor()
+        # Check if datetime column exists
+        try:
+            has_datetime = bool(cur.execute("SELECT 1 FROM pragma_table_info('hourly_data') WHERE name='datetime'").fetchone())
+        except Exception:
+            has_datetime = False
+        if has_datetime:
+            query = """
+                SELECT 
+                    COUNT(*) as total_records,
+                    MIN(datetime) as earliest_date,
+                    MAX(datetime) as latest_date,
+                    MIN(close_price) as min_price,
+                    MAX(close_price) as max_price,
+                    AVG(close_price) as avg_price,
+                    AVG(volume) as avg_volume
+                FROM hourly_data
+            """
+            stats = pd.read_sql_query(query, conn)
+            conn.close()
+            return stats.iloc[0].to_dict()
+        else:
+            # Compute stats from timestamp with unit detection
+            try:
+                row = cur.execute("SELECT COUNT(*), MIN(timestamp), MAX(timestamp), MIN(close_price), MAX(close_price), AVG(close_price), AVG(volume) FROM hourly_data").fetchone()
+                total, min_ts, max_ts, min_p, max_p, avg_p, avg_v = row
+            except Exception:
+                conn.close()
+                return {
+                    'total_records': 0,
+                    'earliest_date': None,
+                    'latest_date': None,
+                    'min_price': None,
+                    'max_price': None,
+                    'avg_price': None,
+                    'avg_volume': None,
+                }
+            unit_guess = 'ms'
+            if max_ts is not None and max_ts < 1e11:
+                unit_guess = 's'
+            earliest = pd.to_datetime(min_ts, unit=unit_guess) if min_ts is not None else None
+            latest = pd.to_datetime(max_ts, unit=unit_guess) if max_ts is not None else None
+            conn.close()
+            return {
+                'total_records': int(total or 0),
+                'earliest_date': earliest.strftime('%Y-%m-%d %H:%M:%S') if earliest is not None else None,
+                'latest_date': latest.strftime('%Y-%m-%d %H:%M:%S') if latest is not None else None,
+                'min_price': float(min_p) if min_p is not None else None,
+                'max_price': float(max_p) if max_p is not None else None,
+                'avg_price': float(avg_p) if avg_p is not None else None,
+                'avg_volume': float(avg_v) if avg_v is not None else None,
+            }
     
     def export_to_csv(self, filename='bitcoin_hourly_data.csv', start_date=None, end_date=None):
         """Export data to CSV file"""

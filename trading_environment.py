@@ -163,44 +163,82 @@ class TradingMetrics:
         min_trades_required = 4
         
         # Normalize metrics
-        sortino_normalized = min(metrics['sortino_ratio'] / 2.0, 1.0)  # Cap at 2.0
-        calmar_normalized = min(metrics['calmar_ratio'] / 3.0, 1.0)    # Cap at 3.0
-        profit_factor_normalized = min(metrics['profit_factor'] / 2.0, 1.0)  # Cap at 2.0
-        win_rate_normalized = metrics['win_rate']
+        sortino_normalized = min(max(metrics['sortino_ratio'], 0.0) / 2.0, 1.0)  # Cap at 2.0
+        calmar_normalized = min(max(metrics['calmar_ratio'], 0.0) / 3.0, 1.0)    # Cap at 3.0
+        profit_factor_normalized = min(max(metrics['profit_factor'], 0.0) / 2.0, 1.0)  # Cap at 2.0
+        win_rate_normalized = max(min(metrics['win_rate'], 1.0), 0.0)
         max_drawdown_inverse = 1 / (1 + abs(metrics['max_drawdown']))
         
         # Trade frequency normalization (target: 4 trades per day or more)
         expected_max_trades_per_day = 4.0
-        trade_freq_normalized = min(metrics['trade_frequency'] / expected_max_trades_per_day, 1.0)
+        trade_freq_normalized = min(max(metrics['trade_frequency'], 0.0) / expected_max_trades_per_day, 1.0)
         
-        # Base composite score
+        # SQN normalization (cap at 3.0)
+        sqn_normalized = min(max(metrics.get('sqn', 0.0), 0.0) / 3.0, 1.0)
+        
+        # Base composite score (Option B weights)
         base_composite_score = (
-            0.28 * sortino_normalized +
-            0.22 * calmar_normalized +
-            0.20 * profit_factor_normalized +
-            0.15 * win_rate_normalized +
-            0.10 * max_drawdown_inverse +
-            0.05 * trade_freq_normalized
+            0.24 * sortino_normalized +
+            0.20 * calmar_normalized +
+            0.18 * profit_factor_normalized +
+            0.16 * win_rate_normalized +
+            0.07 * max_drawdown_inverse +
+            0.10 * trade_freq_normalized +
+            0.05 * sqn_normalized
         )
         
-        # Penalize if trading activity is below threshold
+        # Episode activity penalty (very low activity episodes)
         if total_trades < min_trades_required:
             activity_penalty = max(0.0, total_trades / float(min_trades_required))
             base_composite_score *= activity_penalty
         
+        # User constraints penalties (hinge-style)
+        # 1) Minimum trades/day >= 3
+        min_trades_per_day = 3.0
+        tf = float(metrics.get('trade_frequency', 0.0))
+        penalty_trades = 1.0 if tf >= min_trades_per_day else max(0.0, tf / min_trades_per_day)
+        
+        # 2) Win rate >= 50%
+        wr = float(metrics.get('win_rate', 0.0))
+        if wr >= 0.5:
+            penalty_wr = 1.0
+        else:
+            # Quadratic penalty to discourage very low win rates
+            penalty_wr = max(0.0, (wr / 0.5) ** 2)
+        
+        penalized_score = base_composite_score * penalty_trades * penalty_wr
+        
         # Final normalized composite score in [0, 1]
-        final_composite_score = max(0.0, min(1.0, base_composite_score))
+        final_composite_score = max(0.0, min(1.0, penalized_score))
         return final_composite_score
+
+    def calculate_composite_score_pct(self) -> float:
+        """Return composite score scaled to percentage [0, 100].
+
+        Keeps the existing normalized score (0-1) intact for internal logic and
+        reward shaping stability, but provides a human-friendly percentage for
+        reporting.
+        """
+        base = self.calculate_composite_score()
+        return float(round(base * 100.0, 4))
 
 class GridTradingEnvironment:
     """Grid Trading Environment for PPO training"""
     
     def __init__(self, data_query: DataQuery, window_size: int = 96, 
-                 grid_spacing: float = 0.0005, risk_reward_ratio: float = 2.5,
+                 grid_spacing: float = 0.0003, risk_reward_ratio: float = 2.5,
                  initial_balance: float = 10000.0,
                  hold_time_penalty_hours: int = 2,
                  hold_time_penalty: float = -0.005,
-                 optimize_for_composite: bool = False):
+                 optimize_for_composite: bool = False,
+                 per_trade_risk_dollars: float = 4.0,
+                 fixed_dollar_rr: bool = True,
+                 flat_hold_penalty: float = -0.05,
+                 open_hold_penalty: float = -0.05,
+                 min_bb_width: float = 0.01,
+                 low_vol_penalty: float = -0.02,
+                 use_vwap_filter: bool = False,
+                 vwap_longs_only: bool = False):
         
         self.data_query = data_query
         self.window_size = window_size
@@ -210,11 +248,27 @@ class GridTradingEnvironment:
         self.hold_time_penalty_hours = hold_time_penalty_hours
         self.hold_time_penalty = hold_time_penalty
         self.optimize_for_composite = optimize_for_composite
+        # Trend filter config
+        self.use_vwap_filter = bool(use_vwap_filter)
+        self.vwap_longs_only = bool(vwap_longs_only)
+        # Fixed-dollar RR config (risk per trade in $; reward implied by rr)
+        self.per_trade_risk_dollars = float(per_trade_risk_dollars)
+        self.fixed_dollar_rr = bool(fixed_dollar_rr)
+        # Strong holding penalties
+        self.flat_hold_penalty = float(flat_hold_penalty)
+        self.open_hold_penalty = float(open_hold_penalty)
+        # Volatility floor (Bollinger band width normalized by SMA). Set <=0 to disable.
+        self.min_bb_width = float(min_bb_width)
+        self.low_vol_penalty = float(low_vol_penalty)
+        # Enforce exits strictly at SL/TP only
+        self.require_sl_tp_close: bool = True
         
         # Load and prepare data
         self.data = None
         self.current_step = 0
         self.max_steps = 0
+        # Anchor price for multiplicative grid levels (first close in loaded data)
+        self.anchor_price: Optional[float] = None
         
         # Trading state
         self.balance = initial_balance
@@ -229,18 +283,44 @@ class GridTradingEnvironment:
         df = self.data_query.get_data(start_date=start_date, end_date=end_date)
         df = self.data_query.calculate_indicators(df)
         
-        # Remove NaN values
-        df = df.dropna()
-        
         # Select features for the model
         feature_columns = [
             'close_price', 'volume', 'vwap', 'price_minus_vwap',
             'above_vwap', 'rsi', 'rsi_50_cross'
         ]
         
-        self.data = df[feature_columns + ['datetime', 'timestamp']].copy()
+        extra_cols = []
+        if 'bb_pctb' in df.columns:
+            extra_cols.append('bb_pctb')
+        if 'bb_width' in df.columns:
+            extra_cols.append('bb_width')
+        
+        # Remove NaN values ONLY from the required columns used by the model/timekeeping
+        rows_before = len(df)
+        required_cols = feature_columns + ['datetime', 'timestamp']
+        required_cols = [c for c in required_cols if c in df.columns]
+        df = df.dropna(subset=required_cols)
+        rows_after = len(df)
+        dropped = rows_before - rows_after
+        if dropped > 0:
+            print(f"Dropped {dropped} rows due to NaNs in required columns: {required_cols}")
+        # If everything dropped (e.g., indicator windows too long), set empty data
+        if len(df) == 0:
+            cols = ['close_price', 'volume', 'vwap', 'price_minus_vwap',
+                    'above_vwap', 'rsi', 'rsi_50_cross', 'datetime', 'timestamp']
+            self.data = pd.DataFrame(columns=cols)
+            self.anchor_price = None
+            self.max_steps = 0
+            print("Loaded 0 data points, 0 training steps available")
+            return
+        self.data = df[feature_columns + ['datetime', 'timestamp'] + extra_cols].copy()
+        # Define anchor price for grid ladder as the first available close
+        if len(self.data) > 0:
+            self.anchor_price = float(self.data.iloc[0]['close_price'])
+        else:
+            self.anchor_price = None
         # Ensure non-negative max_steps for short slices
-        self.max_steps = max(1, len(self.data) - 1)
+        self.max_steps = max(0, len(self.data) - 1)
         
         print(f"Loaded {len(self.data)} data points, {self.max_steps} training steps available")
         
@@ -269,10 +349,11 @@ class GridTradingEnvironment:
         start_idx = max(0, min(self.current_step, len(self.data) - 1))
         end_idx = min(len(self.data), start_idx + self.window_size)
         
-        # Get feature data
+        # Get feature data (prefer Bollinger %B when present)
+        use_bb = ('bb_pctb' in self.data.columns) and (not self.data['bb_pctb'].isna().all())
         feature_columns = [
             'close_price', 'volume', 'vwap', 'price_minus_vwap',
-            'above_vwap', 'rsi', 'rsi_50_cross'
+            'above_vwap', 'rsi', 'bb_pctb' if use_bb else 'rsi_50_cross'
         ]
         
         obs_data = self.data.iloc[start_idx:end_idx][feature_columns].values
@@ -326,6 +407,11 @@ class GridTradingEnvironment:
         
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
         """Execute one step in the environment"""
+        # Guard: if no data available, terminate immediately to avoid iloc errors
+        if self.data is None or len(self.data) == 0:
+            zero_obs = np.zeros((self.window_size, 10), dtype=np.float32)
+            info = {'balance': self.balance, 'current_price': 0.0, 'position': False, 'step': self.current_step}
+            return zero_obs, 0.0, True, info
         idx = min(self.current_step + self.window_size, len(self.data) - 1)
         current_price = self.data.iloc[idx]['close_price']
         
@@ -344,16 +430,10 @@ class GridTradingEnvironment:
         # Update metrics
         self.metrics.update_equity(self.balance)
         
-        # Composite-only optimization: zero intermediate rewards; terminal reward = composite score
-        if self.optimize_for_composite:
-            if not done:
-                reward = 0.0
-            else:
-                # Compute final metrics and use composite score as terminal reward
-                metrics = self.get_episode_metrics()
-                reward = float(metrics.get('composite_score', 0.0))
-                # Reset metrics to avoid double counting on caller side
-                # Note: get_episode_metrics already updated metrics; caller can still read it
+        # Composite optimization: preserve shaping rewards; at terminal step use composite as reward
+        if self.optimize_for_composite and done:
+            metrics = self.get_episode_metrics()
+            reward = float(metrics.get('composite_score', 0.0))
         
         # Prepare info dict
         info = {
@@ -367,94 +447,151 @@ class GridTradingEnvironment:
         
     def _execute_action(self, action: int, current_price: float) -> float:
         """Execute trading action and return reward"""
-        reward = 0.0
-        
-        if action == ActionType.BUY.value:
-            reward = self._execute_buy(current_price)
-        elif action == ActionType.SELL.value:
-            reward = self._execute_sell(current_price)
-        else:  # HOLD
-            reward = self._execute_hold(current_price)
-            
-        return reward
-        
-    def _execute_buy(self, current_price: float) -> float:
-        """Execute buy action (long position)"""
+        # If position is open, ignore the action and only check SL/TP
         if self.current_position is not None:
-            return -0.01  # Penalty for invalid action
-            
-        # Calculate grid levels
-        grid_level = current_price
-        # TP at +0.25% (5 grids), SL at -0.1% (2 grids) with grid_spacing = 0.05%
-        take_profit = current_price * (1 + self.grid_spacing * 5.0)
-        stop_loss = current_price * (1 - self.grid_spacing * 2.0)
+            return self._execute_hold(current_price)
+
+        # Flat: only BUY/SELL allowed; HOLD discouraged strongly
+        if action == ActionType.BUY.value:
+            # Volatility floor gate (if enabled and bb_width present)
+            idx = min(self.current_step + self.window_size, len(self.data) - 1)
+            if self.min_bb_width > 0 and 'bb_width' in self.data.columns:
+                bw = self.data.iloc[idx].get('bb_width', np.nan)
+                if not np.isnan(bw) and bw < self.min_bb_width:
+                    return self.low_vol_penalty
+
+            # VWAP trend filter: allow BUY only if price > VWAP (when enabled)
+            if self.use_vwap_filter and 'vwap' in self.data.columns:
+                vwap_val = self.data.iloc[idx].get('vwap', np.nan)
+                if not np.isnan(vwap_val):
+                    if not (current_price > float(vwap_val)):
+                        # Reject BUY when below/at VWAP
+                        return self.flat_hold_penalty
+            return self._execute_buy(current_price)
+        elif action == ActionType.SELL.value:
+            # Volatility floor gate (if enabled and bb_width present)
+            idx = min(self.current_step + self.window_size, len(self.data) - 1)
+            if self.min_bb_width > 0 and 'bb_width' in self.data.columns:
+                bw = self.data.iloc[idx].get('bb_width', np.nan)
+                if not np.isnan(bw) and bw < self.min_bb_width:
+                    return self.low_vol_penalty
+
+            # VWAP trend filter: allow SELL only if price < VWAP (unless longs-only)
+            if self.use_vwap_filter and 'vwap' in self.data.columns:
+                if self.vwap_longs_only:
+                    # Block all SELLs in longs-only mode
+                    return self.flat_hold_penalty
+                vwap_val = self.data.iloc[idx].get('vwap', np.nan)
+                if not np.isnan(vwap_val):
+                    if not (current_price < float(vwap_val)):
+                        # Reject SELL when above/at VWAP
+                        return self.flat_hold_penalty
+            return self._execute_sell(current_price)
+        else:
+            # Discourage HOLD when flat
+            return self.flat_hold_penalty
         
-        # Create position
+    # -------- Grid helper utilities (strict grid ladder) --------
+    def _grid_factor(self) -> float:
+        """Multiplicative factor between adjacent grid levels."""
+        return 1.0 + float(self.grid_spacing)
+
+    def _grid_index_for_price(self, price: float) -> int:
+        """Get nearest integer grid index for a given price using the anchor."""
+        if not self.anchor_price or self.anchor_price <= 0:
+            # Fallback: treat current price as anchor index 0
+            return 0
+        import math
+        k = math.log(max(price, 1e-12) / self.anchor_price) / math.log(self._grid_factor())
+        return int(round(k))
+
+    def _price_from_grid_index(self, k: int) -> float:
+        """Compute price at grid index k from the anchor price."""
+        if not self.anchor_price or self.anchor_price <= 0:
+            return 0.0
+        return float(self.anchor_price) * (self._grid_factor() ** int(k))
+
+    def _round_to_grid(self, price: float) -> Tuple[float, int]:
+        """Round a raw price to the nearest grid level and return (grid_price, grid_index)."""
+        k = self._grid_index_for_price(price)
+        p = self._price_from_grid_index(k)
+        return p, k
+
+    def _execute_buy(self, current_price: float) -> float:
+        """Execute buy action (long position). Entry and exits at grid levels only."""
+        if self.current_position is not None:
+            return -0.01  # invalid action penalty
+        entry_price, entry_grid_idx = self._round_to_grid(current_price)
+        # Use fixed risk grids for SL
+        risk_grids = 2
+        sl_grid_idx = entry_grid_idx - risk_grids
+        stop_loss = self._price_from_grid_index(sl_grid_idx)
+        # Compute TP from exact dollar RR target and snap to nearest grid
+        tp_target = entry_price + self.rr * (entry_price - stop_loss)
+        tp_grid_idx = self._grid_index_for_price(tp_target)
+        take_profit = self._price_from_grid_index(tp_grid_idx)
+        qty = 1.0
+        if self.fixed_dollar_rr:
+            risk_diff = max(1e-12, entry_price - stop_loss)
+            qty = self.per_trade_risk_dollars / risk_diff
         self.current_position = Position(
-            entry_price=current_price,
+            entry_price=entry_price,
             entry_time=self.current_step,
             position_type='long',
-            grid_level=grid_level,
+            grid_level=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            quantity=qty,
             entry_index=min(self.current_step + self.window_size, len(self.data) - 1)
         )
-        
-        return 0.0  # No immediate reward for opening position
-        
+        return 0.0
+
     def _execute_sell(self, current_price: float) -> float:
-        """Execute sell action (short position)"""
+        """Execute sell action (short position). Entry and exits at grid levels only."""
         if self.current_position is not None:
-            return -0.01  # Penalty for invalid action
-            
-        # Calculate grid levels
-        grid_level = current_price
-        # TP at -0.25% (5 grids), SL at +0.1% (2 grids) with grid_spacing = 0.05%
-        take_profit = current_price * (1 - self.grid_spacing * 5.0)
-        stop_loss = current_price * (1 + self.grid_spacing * 2.0)
-        
-        # Create position
+            return -0.01
+        entry_price, entry_grid_idx = self._round_to_grid(current_price)
+        # Use fixed risk grids for SL
+        risk_grids = 2
+        sl_grid_idx = entry_grid_idx + risk_grids
+        stop_loss = self._price_from_grid_index(sl_grid_idx)
+        # Compute TP from exact dollar RR target and snap to nearest grid
+        tp_target = entry_price - self.rr * (stop_loss - entry_price)
+        tp_grid_idx = self._grid_index_for_price(tp_target)
+        take_profit = self._price_from_grid_index(tp_grid_idx)
+        qty = 1.0
+        if self.fixed_dollar_rr:
+            risk_diff = max(1e-12, stop_loss - entry_price)
+            qty = self.per_trade_risk_dollars / risk_diff
         self.current_position = Position(
-            entry_price=current_price,
+            entry_price=entry_price,
             entry_time=self.current_step,
             position_type='short',
-            grid_level=grid_level,
+            grid_level=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            quantity=qty,
             entry_index=min(self.current_step + self.window_size, len(self.data) - 1)
         )
-        
-        return 0.0  # No immediate reward for opening position
-        
-    def _execute_hold(self, current_price: float) -> float:
-        """Execute hold action"""
-        if self.current_position is None:
-            return 0.0  # No position, no reward
-            
-        # Check for exit conditions
-        position = self.current_position
-        
-        # Check stop loss and take profit
-        if position.position_type == 'long':
-            if current_price <= position.stop_loss or current_price >= position.take_profit:
-                return self._close_position(current_price)
-        else:  # short
-            if current_price >= position.stop_loss or current_price <= position.take_profit:
-                return self._close_position(current_price)
-                
-        # Small reward for unrealized gains
-        if position.position_type == 'long':
-            unrealized_pnl = (current_price - position.entry_price) / position.entry_price
-        else:
-            unrealized_pnl = (position.entry_price - current_price) / position.entry_price
-        reward = unrealized_pnl * 0.01  # Small reward for unrealized gains
+        return 0.0
 
-        # Apply penalty if position held longer than threshold (assumes 1 step = 1 hour)
-        hours_held = max(0, self.current_step - position.entry_time)
-        if hours_held >= self.hold_time_penalty_hours:
-            reward += self.hold_time_penalty
-        
-        return reward  
+    def _execute_hold(self, current_price: float) -> float:
+        """When a position is open, only close at SL/TP. No shaping rewards/penalties."""
+        if self.current_position is None:
+            return 0.0
+        position = self.current_position
+        if position.position_type == 'long':
+            if current_price <= position.stop_loss:
+                return self._close_position(position.stop_loss)
+            if current_price >= position.take_profit:
+                return self._close_position(position.take_profit)
+        else:
+            if current_price >= position.stop_loss:
+                return self._close_position(position.stop_loss)
+            if current_price <= position.take_profit:
+                return self._close_position(position.take_profit)
+        # Apply strong penalty while holding to encourage faster resolution via SL/TP
+        return self.open_hold_penalty
         
     def _close_position(self, exit_price: float) -> float:
         """Close current position and calculate reward"""
@@ -474,6 +611,7 @@ class GridTradingEnvironment:
             entry_price=position.entry_price,
             exit_price=exit_price,
             position_type=position.position_type,
+            quantity=position.quantity,
             entry_time=entry_dt,
             exit_time=exit_dt
         )
@@ -492,8 +630,8 @@ class GridTradingEnvironment:
         
     def get_episode_metrics(self) -> Dict[str, float]:
         """Get metrics for the completed episode"""
-        # Close any open position at current price
-        if self.current_position is not None:
+        # If strict SL/TP-only exits, do not force close open positions at episode end
+        if self.current_position is not None and not getattr(self, 'require_sl_tp_close', True):
             idx = min(self.current_step, len(self.data) - 1)
             current_price = self.data.iloc[idx]['close_price']
             self._close_position(current_price)
@@ -502,6 +640,7 @@ class GridTradingEnvironment:
         metrics['episode_return'] = (self.balance - self.episode_start_balance) / self.episode_start_balance
         metrics['final_balance'] = self.balance
         metrics['composite_score'] = self.metrics.calculate_composite_score()
+        metrics['composite_score_pct'] = self.metrics.calculate_composite_score_pct()
         
         return metrics
 

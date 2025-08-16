@@ -25,6 +25,8 @@ from data_query import DataQuery
 from neural_network import PPONetwork
 from trading_environment import GridTradingEnvironment
 from ppo_algorithm import PPOAgent, PPOConfig, PPOTrainer
+from ensemble import EnsemblePPOAgent
+from generate_html_report import generate_report
 
 def setup_training_dates(data_query: DataQuery) -> Dict[str, str]:
     """Setup training, validation, and test date ranges based on available data"""
@@ -55,7 +57,7 @@ def setup_training_dates(data_query: DataQuery) -> Dict[str, str]:
         'test_start': test_start.strftime('%Y-%m-%d %H:%M:%S'),
         'test_end': test_end.strftime('%Y-%m-%d %H:%M:%S')
     }
-    
+
     print("=== Data Split ===")
     print(f"Training:   {dates['train_start']} to {dates['train_end']} ({train_days} days)")
     print(f"Validation: {dates['val_start']} to {dates['val_end']} ({val_days} days)")
@@ -63,6 +65,22 @@ def setup_training_dates(data_query: DataQuery) -> Dict[str, str]:
     print()
     
     return dates
+
+def _sample_indicator_params(rng: np.random.RandomState) -> dict:
+    vwap_choices = [16, 24, 32, 48, 64]
+    rsi_choices = [10, 14, 21]
+    use_bb_choices = [True, False]
+    bb_win_choices = [14, 20, 30]
+    bb_k_choices = [1.5, 2.0, 2.5]
+    params = {
+        'vwap_window': int(rng.choice(vwap_choices)),
+        'rsi_period': int(rng.choice(rsi_choices)),
+        'use_bbands': bool(rng.choice(use_bb_choices)),
+    }
+    if params['use_bbands']:
+        params['bb_window'] = int(rng.choice(bb_win_choices))
+        params['bb_k'] = float(rng.choice(bb_k_choices))
+    return params
 
 def create_config(args) -> PPOConfig:
     """Create PPO configuration from command line arguments"""
@@ -98,6 +116,30 @@ def create_config(args) -> PPOConfig:
     
     return config
 
+# --- Hyperparameter tuning helpers ---
+def _sample_hparams(rng: np.random.RandomState, base_args) -> dict:
+    lr_choices = [1e-4, 2e-4, 3e-4, 5e-4]
+    ent_choices = [0.005, 0.01, 0.02, 0.03]
+    clip_choices = [0.1, 0.2, 0.3]
+    nsteps_choices = [1024, 1536, 2048]
+    batch_choices = [64, 128]
+    epochs_choices = [5, 10]
+    vcoef_choices = [0.4, 0.5, 0.7]
+    gae_choices = [0.9, 0.95, 0.98]
+    hdim_choices = [128, 256, 384]
+
+    return {
+        'learning_rate': float(rng.choice(lr_choices)),
+        'entropy_coef': float(rng.choice(ent_choices)),
+        'clip_epsilon': float(rng.choice(clip_choices)),
+        'n_steps': int(rng.choice(nsteps_choices)),
+        'batch_size': int(rng.choice(batch_choices)),
+        'n_epochs': int(rng.choice(epochs_choices)),
+        'value_coef': float(rng.choice(vcoef_choices)),
+        'gae_lambda': float(rng.choice(gae_choices)),
+        'hidden_dim': int(rng.choice(hdim_choices)),
+    }
+
 def train_model(args):
     """Main training function"""
     print("=== PPO Grid Trading System Training ===")
@@ -130,13 +172,18 @@ def train_model(args):
     
     # Initialize trainer
     print("Initializing PPO trainer...")
+    env_kwargs = {
+        'use_vwap_filter': bool(getattr(args, 'use_vwap_filter', False)),
+        'vwap_longs_only': bool(getattr(args, 'vwap_longs_only', False)),
+    }
     trainer = PPOTrainer(
         config=config,
         data_query=data_query,
         train_start_date=dates['train_start'],
         train_end_date=dates['train_end'],
         val_start_date=dates['val_start'],
-        val_end_date=dates['val_end']
+        val_end_date=dates['val_end'],
+        env_kwargs=env_kwargs
     )
     
     # Override episode steps if provided
@@ -315,7 +362,24 @@ def run_pipeline(args):
     assert args.mode in {"short", "targeted"}, "Supported modes: 'short', 'targeted'"
 
     print(f"=== Pipeline: {args.mode} ===")
-    data_query = DataQuery()
+    # Build env kwargs for gating tests (defaults off)
+    env_kwargs = {
+        'use_vwap_filter': bool(getattr(args, 'use_vwap_filter', False)),
+        'vwap_longs_only': bool(getattr(args, 'vwap_longs_only', False)),
+    }
+    # Build DataQuery using pipeline indicator args (defaults preserved if not provided)
+    dq_kwargs = {}
+    if hasattr(args, 'vwap_window') and args.vwap_window is not None:
+        dq_kwargs['vwap_window'] = int(args.vwap_window)
+    if hasattr(args, 'rsi_period') and args.rsi_period is not None:
+        dq_kwargs['rsi_period'] = int(args.rsi_period)
+    if hasattr(args, 'use_bbands') and args.use_bbands:
+        dq_kwargs['use_bbands'] = True
+        if getattr(args, 'bb_window', None) is not None:
+            dq_kwargs['bb_window'] = int(args.bb_window)
+        if getattr(args, 'bb_k', None) is not None:
+            dq_kwargs['bb_k'] = float(args.bb_k)
+    data_query = DataQuery(**dq_kwargs)
     stats = data_query.get_data_stats()
 
     latest = datetime.strptime(stats['latest_date'], '%Y-%m-%d %H:%M:%S')
@@ -351,31 +415,164 @@ def run_pipeline(args):
         # Config
         config = create_config(args)
 
-        # Trainer with OOS as validation
-        trainer = PPOTrainer(
-            config=config,
-            data_query=data_query,
-            train_start_date=train_start_s,
-            train_end_date=train_end_s,
-            val_start_date=oos_start_s,
-            val_end_date=oos_end_s
-        )
+        # Ensemble settings
+        ensemble_size = int(getattr(args, 'ensemble_size', 1) or 1)
+        ensemble_agg = str(getattr(args, 'ensemble_agg', 'avg_logits'))
+        ensemble_weights_arg = getattr(args, 'ensemble_weights', None)
+        parsed_weights = None
+        if ensemble_weights_arg:
+            try:
+                parsed_weights = [float(x) for x in str(ensemble_weights_arg).split(',') if x.strip()!='']
+            except Exception:
+                parsed_weights = None
+                print("Warning: failed to parse --ensemble-weights; ignoring")
+        model_paths = []
 
-        # Train
-        best_model_path = trainer.train(n_episodes=args.episodes)
-        if not best_model_path:
-            best_model_path = f'checkpoints/final_model_episode_{args.episodes}.pt'
+        # Optional PPO hyperparameter + indicator tuning on OOS before ensemble training
+        if getattr(args, 'tune_hparams', False):
+            print("\n[HParam Tuning] Starting PPO hyperparameter tuning (short pipeline)...")
+            rng = np.random.RandomState(int(getattr(args, 'seed_base', 42)))
+            trials = int(getattr(args, 'tune_trials', 20))
+            trial_episodes = int(getattr(args, 'tune_trial_episodes', 100))
+            best = {'score': -1e9, 'params': None, 'ind': None}
+            for t_idx in range(1, trials + 1):
+                params = _sample_hparams(rng, args)
+                ind_params = _sample_indicator_params(rng)
+                # Make a shallow copy of args with sampled params
+                trial_args = argparse.Namespace(**vars(args))
+                for k, v in params.items():
+                    setattr(trial_args, k, v)
+                trial_args.episodes = trial_episodes
+                trial_config = create_config(trial_args)
+                # Use per-trial DataQuery with sampled indicator params
+                trial_dq = DataQuery(**ind_params)
+                tr = PPOTrainer(
+                    config=trial_config,
+                    data_query=trial_dq,
+                    train_start_date=train_start_s,
+                    train_end_date=train_end_s,
+                    val_start_date=oos_start_s,
+                    val_end_date=oos_end_s
+                )
+                print(f"[HParam Tuning] Trial {t_idx}/{trials}: {params} | indicators={ind_params}")
+                _ = tr.train(n_episodes=trial_episodes)
+                m = tr.agent.evaluate(tr.val_env, n_episodes=max(1, args.eval_episodes))
+                score = float(m.get('eval_composite_score', 0.0))
+                print(f"[HParam Tuning] Trial {t_idx} OOS composite: {score:.4f}")
+                if score > best['score']:
+                    best = {'score': score, 'params': params, 'ind': ind_params}
+            if best['params'] is not None:
+                print(f"[HParam Tuning] Best OOS composite: {best['score']:.4f} with params={best['params']} indicators={best['ind']}")
+                # Apply best params to main config
+                for k, v in best['params'].items():
+                    setattr(args, k, v)
+                config = create_config(args)
+                # Rebuild main data_query with best indicator params
+                if best.get('ind'):
+                    data_query = DataQuery(**best['ind'])
+            else:
+                print("[HParam Tuning] No improvement found; using initial config.")
 
-        # Evaluate on OOS (validation env)
-        print("\nEvaluating on OOS window...")
-        oos_results = trainer.agent.evaluate(trainer.val_env, n_episodes=max(1, args.eval_episodes))
+        if ensemble_size <= 1:
+            # Single trainer with OOS as validation
+            trainer = PPOTrainer(
+                config=config,
+                data_query=data_query,
+                train_start_date=train_start_s,
+                train_end_date=train_end_s,
+                val_start_date=oos_start_s,
+                val_end_date=oos_end_s,
+                env_kwargs=env_kwargs
+            )
+            best_model_path = trainer.train(n_episodes=args.episodes)
+            if not best_model_path:
+                best_model_path = f'checkpoints/final_model_episode_{args.episodes}.pt'
+            model_paths = [best_model_path]
 
-        # Backtest on last 7 days
-        backtest_results = trainer.backtest(
-            model_path=best_model_path,
-            test_start_date=backtest_start_s,
-            test_end_date=backtest_end_s
-        )
+            # Evaluate on OOS (validation env)
+            print("\nEvaluating on OOS window...")
+            oos_results = trainer.agent.evaluate(trainer.val_env, n_episodes=max(1, args.eval_episodes))
+
+            # Backtest on last 7 days
+            backtest_results = trainer.backtest(
+                model_path=best_model_path,
+                test_start_date=backtest_start_s,
+                test_end_date=backtest_end_s
+            )
+        else:
+            # Train multiple agents with different seeds and evaluate as an ensemble
+            import random as pyrand
+            base_seed = int(getattr(args, 'seed_base', 42))
+            trainers = []
+            for i in range(ensemble_size):
+                seed = base_seed + i
+                pyrand.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+                tr_i = PPOTrainer(
+                    config=config,
+                    data_query=data_query,
+                    train_start_date=train_start_s,
+                    train_end_date=train_end_s,
+                    val_start_date=oos_start_s,
+                    val_end_date=oos_end_s,
+                    env_kwargs=env_kwargs
+                )
+                trainers.append(tr_i)
+                print(f"\n[Ensemble] Training member {i+1}/{ensemble_size}...")
+                best_path_i = tr_i.train(n_episodes=args.episodes)
+                if not best_path_i:
+                    best_path_i = f'checkpoints/final_model_episode_{args.episodes}.pt'
+                model_paths.append(best_path_i)
+
+            # Build ensemble from trained members
+            agents = [t.agent for t in trainers]
+            ensemble = EnsemblePPOAgent(agents, agg=ensemble_agg, weights=parsed_weights if parsed_weights else None)
+
+            # Optionally tune aggregation method and weights on OOS
+            if getattr(args, 'tune_ensemble_weights', False):
+                val_env = trainers[0].val_env
+                best = {'score': -1e9, 'agg': ensemble_agg, 'weights': ensemble.weights[:]} 
+                cand_aggs = ['avg_logits','avg_probs','majority'] if getattr(args, 'tune_agg', True) else [ensemble_agg]
+                trials = int(getattr(args, 'tune_ensemble_trials', 50))
+                print(f"\n[Tuning] Ensemble weights/agg on OOS: trials={trials}, aggs={cand_aggs}")
+                for agg in cand_aggs:
+                    for t_i in range(trials):
+                        # Sample weights from Dirichlet (uniform over simplex)
+                        w = np.random.dirichlet(np.ones(ensemble_size)).tolist()
+                        ensemble.set_weights(w)
+                        ensemble.agg = agg
+                        m = ensemble.evaluate(val_env, n_episodes=max(1, args.eval_episodes), deterministic=True)
+                        score = float(m.get('eval_composite_score', 0.0))
+                        if score > best['score']:
+                            best = {'score': score, 'agg': agg, 'weights': w}
+                ensemble.agg = best['agg']
+                ensemble.set_weights(best['weights'])
+                print(f"[Tuning] Best OOS score={best['score']:.4f} agg={best['agg']} weights={[round(x,3) for x in best['weights']]}")
+
+            # OOS evaluate using validation env from the first trainer
+            print("\nEvaluating ENSEMBLE on OOS window...")
+            oos_results = ensemble.evaluate(trainers[0].val_env, n_episodes=max(1, args.eval_episodes), deterministic=True)
+
+            # Backtest: create a fresh test env and evaluate ensemble by stepping actions via ensemble
+            print("\nEvaluating ENSEMBLE on backtest window...")
+            # Reuse trainer[0] backtest env creation for consistency
+            bt_env = PPOTrainer(
+                config=config,
+                data_query=data_query,
+                train_start_date=train_start_s,
+                train_end_date=train_end_s,
+                val_start_date=oos_start_s,
+                val_end_date=oos_end_s,
+                env_kwargs=env_kwargs
+            )
+            # Load test data window
+            test_env = GridTradingEnvironment(data_query, **env_kwargs)
+            test_env.load_data(backtest_start_s, backtest_end_s)
+            backtest_results = ensemble.evaluate(test_env, n_episodes=1, deterministic=True)
 
         # Concise pipeline report
         def pick(metrics: dict):
@@ -390,7 +587,8 @@ def run_pipeline(args):
             'train_window': [train_start_s, train_end_s],
             'oos_window': [oos_start_s, oos_end_s],
             'backtest_window': [backtest_start_s, backtest_end_s],
-            'model_path': best_model_path,
+            'model_path': model_paths[0] if model_paths else None,
+            'model_paths': model_paths if len(model_paths) > 1 else None,
             'oos': pick(oos_results),
             'backtest': pick(backtest_results),
             'timestamp': datetime.now().isoformat()
@@ -401,10 +599,64 @@ def run_pipeline(args):
         print(f"BTest -> WinRate: {report['backtest']['win_rate']:.4f} | Composite: {report['backtest']['composite_score']:.4f} | Trades/Day: {report['backtest']['trades_per_day']:.4f}")
 
         os.makedirs('results', exist_ok=True)
-        out_path = os.path.join('results', f"pipeline_short_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+        ts_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_path = os.path.join('results', f"pipeline_short_{ts_now}.json")
         with open(out_path, 'w') as f:
             json.dump(report, f, indent=2)
         print(f"\nPipeline report saved to {out_path}")
+
+        # Create a timestamped folder to store model(s) and detailed reports
+        save_dir = os.path.join('results', f"run_short_{ts_now}")
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Copy model(s) into the run folder
+        try:
+            import shutil
+            if model_paths and len(model_paths) > 1:
+                for i, mp in enumerate(model_paths, start=1):
+                    if mp and os.path.exists(mp):
+                        dst = os.path.join(save_dir, f"model_{i}.pt")
+                        shutil.copy2(mp, dst)
+            else:
+                mp = model_paths[0] if model_paths else report.get('model_path')
+                if mp and os.path.exists(mp):
+                    dst = os.path.join(save_dir, os.path.basename(mp))
+                    shutil.copy2(mp, dst)
+        except Exception as e:
+            print(f"Warning: failed to copy model(s) to {save_dir}: {e}")
+
+        # Generate detailed HTML reports for OOS and Backtest in the run folder
+        try:
+            oos_start, oos_end = report['oos_window']
+            bt_start, bt_end = report['backtest_window']
+            model_for_report = report.get('model_path') or (model_paths[0] if model_paths else None)
+            if model_for_report and os.path.exists(model_for_report):
+                oos_html = os.path.join(save_dir, 'OOS_report.html')
+                bt_html = os.path.join(save_dir, 'Backtest_report.html')
+                print(f"Generating OOS report -> {oos_html}")
+                generate_report(
+                    model_path=model_for_report,
+                    start_date=oos_start,
+                    end_date=oos_end,
+                    window='oos',
+                    use_vwap_filter=bool(getattr(args, 'use_vwap_filter', False)),
+                    vwap_longs_only=bool(getattr(args, 'vwap_longs_only', False)),
+                    out_html=oos_html,
+                )
+                print(f"Generating Backtest report -> {bt_html}")
+                generate_report(
+                    model_path=model_for_report,
+                    start_date=bt_start,
+                    end_date=bt_end,
+                    window='backtest',
+                    use_vwap_filter=bool(getattr(args, 'use_vwap_filter', False)),
+                    vwap_longs_only=bool(getattr(args, 'vwap_longs_only', False)),
+                    out_html=bt_html,
+                )
+            else:
+                print("Warning: model path missing or not found; skipping HTML report generation.")
+        except Exception as e:
+            print(f"Warning: failed to generate detailed reports: {e}")
 
     if args.mode == 'targeted':
         # Custom split based on args (default: 15 train, 7 OOS, 8 backtest)
@@ -429,7 +681,8 @@ def run_pipeline(args):
             train_start_date=train_start.strftime('%Y-%m-%d %H:%M:%S'),
             train_end_date=train_end.strftime('%Y-%m-%d %H:%M:%S'),
             val_start_date=oos_start.strftime('%Y-%m-%d %H:%M:%S'),
-            val_end_date=oos_end.strftime('%Y-%m-%d %H:%M:%S')
+            val_end_date=oos_end.strftime('%Y-%m-%d %H:%M:%S'),
+            env_kwargs=env_kwargs
         )
 
         # Loop training until criteria met or max rounds
@@ -505,19 +758,92 @@ def run_pipeline(args):
                 achieved = True
                 # Persist history
                 os.makedirs('results', exist_ok=True)
-                out_path = os.path.join('results', f"pipeline_targeted_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+                ts_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+                out_path = os.path.join('results', f"pipeline_targeted_{ts_now}.json")
                 with open(out_path, 'w') as f:
                     json.dump({'history': history, 'final': record}, f, indent=2)
                 print(f"Saved targeted pipeline report to {out_path}")
+
+                # Package artifacts: copy best model and generate detailed reports
+                try:
+                    import shutil, os as _os
+                    save_dir = os.path.join('results', f"run_targeted_{ts_now}")
+                    _os.makedirs(save_dir, exist_ok=True)
+                    best_model = record.get('best_model_path')
+                    if best_model and _os.path.exists(best_model):
+                        shutil.copy2(best_model, os.path.join(save_dir, _os.path.basename(best_model)))
+                    # Windows
+                    oos_start_s = oos_start.strftime('%Y-%m-%d %H:%M:%S')
+                    oos_end_s = oos_end.strftime('%Y-%m-%d %H:%M:%S')
+                    bt_start_s = backtest_start.strftime('%Y-%m-%d %H:%M:%S')
+                    bt_end_s = backtest_end.strftime('%Y-%m-%d %H:%M:%S')
+                    if best_model and _os.path.exists(best_model):
+                        generate_report(
+                            model_path=best_model,
+                            start_date=oos_start_s,
+                            end_date=oos_end_s,
+                            window='oos',
+                            use_vwap_filter=bool(getattr(args, 'use_vwap_filter', False)),
+                            vwap_longs_only=bool(getattr(args, 'vwap_longs_only', False)),
+                            out_html=os.path.join(save_dir, 'OOS_report.html'),
+                        )
+                        generate_report(
+                            model_path=best_model,
+                            start_date=bt_start_s,
+                            end_date=bt_end_s,
+                            window='backtest',
+                            use_vwap_filter=bool(getattr(args, 'use_vwap_filter', False)),
+                            vwap_longs_only=bool(getattr(args, 'vwap_longs_only', False)),
+                            out_html=os.path.join(save_dir, 'Backtest_report.html'),
+                        )
+                except Exception as e:
+                    print(f"Warning: failed to package targeted success artifacts: {e}")
                 break
 
         if not achieved:
             print("\nMax rounds reached without meeting the target criteria.")
             os.makedirs('results', exist_ok=True)
-            out_path = os.path.join('results', f"pipeline_targeted_{datetime.now().strftime('%Y%m%d_%H%M%S')}_incomplete.json")
+            ts_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+            out_path = os.path.join('results', f"pipeline_targeted_{ts_now}_incomplete.json")
             with open(out_path, 'w') as f:
                 json.dump({'history': history}, f, indent=2)
             print(f"Saved targeted pipeline history to {out_path}")
+
+            # Attempt to still package model and reports from the last round
+            try:
+                save_dir = os.path.join('results', f"run_targeted_{ts_now}")
+                os.makedirs(save_dir, exist_ok=True)
+                # Copy last model if present
+                import shutil, os as _os
+                last_model = history[-1]['best_model_path'] if history else None
+                if last_model and _os.path.exists(last_model):
+                    shutil.copy2(last_model, os.path.join(save_dir, _os.path.basename(last_model)))
+                # Generate reports using current windows
+                oos_start_s = oos_start.strftime('%Y-%m-%d %H:%M:%S')
+                oos_end_s = oos_end.strftime('%Y-%m-%d %H:%M:%S')
+                bt_start_s = backtest_start.strftime('%Y-%m-%d %H:%M:%S')
+                bt_end_s = backtest_end.strftime('%Y-%m-%d %H:%M:%S')
+                if last_model and _os.path.exists(last_model):
+                    generate_report(
+                        model_path=last_model,
+                        start_date=oos_start_s,
+                        end_date=oos_end_s,
+                        window='oos',
+                        use_vwap_filter=bool(getattr(args, 'use_vwap_filter', False)),
+                        vwap_longs_only=bool(getattr(args, 'vwap_longs_only', False)),
+                        out_html=os.path.join(save_dir, 'OOS_report.html'),
+                    )
+                    generate_report(
+                        model_path=last_model,
+                        start_date=bt_start_s,
+                        end_date=bt_end_s,
+                        window='backtest',
+                        use_vwap_filter=bool(getattr(args, 'use_vwap_filter', False)),
+                        vwap_longs_only=bool(getattr(args, 'vwap_longs_only', False)),
+                        out_html=os.path.join(save_dir, 'Backtest_report.html'),
+                    )
+            except Exception as e:
+                print(f"Warning: failed to package targeted run artifacts: {e}")
 
 def test_system(args):
     """Test system components"""
@@ -709,13 +1035,18 @@ def run_backtest(args):
         eval_freq=100
     ))
 
+    env_kwargs = {
+        'use_vwap_filter': bool(getattr(args, 'use_vwap_filter', False)),
+        'vwap_longs_only': bool(getattr(args, 'vwap_longs_only', False)),
+    }
     trainer = PPOTrainer(
         config=config,
         data_query=data_query,
         train_start_date=start_date,  # not used during backtest but required by ctor
         train_end_date=end_date,
         val_start_date=start_date,
-        val_end_date=end_date
+        val_end_date=end_date,
+        env_kwargs=env_kwargs
     )
 
     # Override episode steps if provided
@@ -758,6 +1089,9 @@ def main():
     train_parser.add_argument('--save-freq', type=int, default=100, help='Save frequency')
     train_parser.add_argument('--eval-freq', type=int, default=50, help='Evaluation frequency')
     train_parser.add_argument('--optimize-for-composite', action='store_true', help='Use composite score as terminal reward (pure composite optimization)')
+    # VWAP-only trend filter flags
+    train_parser.add_argument('--use-vwap-filter', action='store_true', help='Enable VWAP-only trend gating in env (BUY if price>VWAP; SELL if price<VWAP)')
+    train_parser.add_argument('--vwap-longs-only', action='store_true', help='When VWAP filter is enabled, block SELL entirely (longs only)')
     train_parser.add_argument('--backtest', action='store_true', help='Run backtest after training')
     
     # Evaluation command
@@ -786,6 +1120,27 @@ def main():
     pipe_parser.add_argument('--eval-freq', type=int, default=50, help='Evaluation frequency')
     pipe_parser.add_argument('--eval-episodes', type=int, default=3, help='Episodes for OOS evaluation')
     pipe_parser.add_argument('--optimize-for-composite', action='store_true', help='Use composite score as terminal reward (pure composite optimization)')
+    # Indicator controls
+    pipe_parser.add_argument('--vwap-window', type=int, default=None, help='VWAP rolling window')
+    pipe_parser.add_argument('--rsi-period', type=int, default=None, help='RSI period')
+    pipe_parser.add_argument('--use-bbands', action='store_true', help='Enable Bollinger Bands features')
+    pipe_parser.add_argument('--bb-window', type=int, default=None, help='Bollinger Bands window')
+    pipe_parser.add_argument('--bb-k', type=float, default=None, help='Bollinger Bands std multiplier')
+    # VWAP-only trend filter flags
+    pipe_parser.add_argument('--use-vwap-filter', action='store_true', help='Enable VWAP-only trend gating in env')
+    pipe_parser.add_argument('--vwap-longs-only', action='store_true', help='When VWAP filter is enabled, block SELL entirely (longs only)')
+    # Ensemble options
+    pipe_parser.add_argument('--ensemble-size', type=int, default=1, help='Number of PPO agents in ensemble (1 = no ensemble)')
+    pipe_parser.add_argument('--ensemble-agg', type=str, default='avg_logits', choices=['avg_logits','avg_probs','majority'], help='Ensemble aggregation method')
+    pipe_parser.add_argument('--seed-base', type=int, default=42, help='Base random seed for ensemble members')
+    pipe_parser.add_argument('--ensemble-weights', type=str, default=None, help='Comma-separated weights for ensemble members (e.g., 0.2,0.2,0.2,0.2,0.2)')
+    pipe_parser.add_argument('--tune-ensemble-weights', action='store_true', help='Random search tuning of ensemble weights on OOS')
+    pipe_parser.add_argument('--tune-ensemble-trials', type=int, default=50, help='Number of random trials for ensemble weight tuning')
+    pipe_parser.add_argument('--tune-agg', action='store_true', help='Also tune aggregation method during ensemble tuning')
+    # PPO hyperparameter tuning (applies in short pipeline; tunes before ensemble training)
+    pipe_parser.add_argument('--tune-hparams', action='store_true', help='Random search tuning of PPO hyperparameters on OOS (short pipeline)')
+    pipe_parser.add_argument('--tune-trials', type=int, default=20, help='Number of trials for PPO hyperparameter tuning')
+    pipe_parser.add_argument('--tune-trial-episodes', type=int, default=100, help='Episodes per trial during tuning')
     # Targeted mode specific options
     pipe_parser.add_argument('--train-days', type=int, default=15, help='Training window days (targeted)')
     pipe_parser.add_argument('--oos-days', type=int, default=7, help='Out-of-sample window days (targeted)')
@@ -807,6 +1162,9 @@ def main():
     bt_parser.add_argument('--max-episode-steps', type=int, default=None, help='Override max episode steps during backtest')
     bt_parser.add_argument('--eval-episodes', type=int, default=5, help='Episodes for evaluation inside backtest (if used)')
     bt_parser.add_argument('--epsilon-explore', type=float, default=0.0, help='Epsilon-greedy exploration during evaluation (diagnostic)')
+    # VWAP-only trend filter flags
+    bt_parser.add_argument('--use-vwap-filter', action='store_true', help='Enable VWAP-only trend gating in env during backtest')
+    bt_parser.add_argument('--vwap-longs-only', action='store_true', help='When VWAP filter is enabled, block SELL entirely (longs only) during backtest')
 
     # Test trades command
     tt_parser = subparsers.add_parser('test-trades', help='Run scripted test trades to validate environment')

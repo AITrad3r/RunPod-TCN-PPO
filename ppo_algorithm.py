@@ -323,13 +323,26 @@ class PPOAgent:
             eval_composite_scores.append(episode_metrics['composite_score'])
             eval_metrics.append(episode_metrics)
             
-        # Aggregate results
+        # Aggregate results (robust to missing keys across episodes)
         avg_metrics = {}
-        for key in eval_metrics[0].keys():
-            avg_metrics[f'eval_{key}'] = np.mean([m[key] for m in eval_metrics])
-            
-        avg_metrics['eval_reward'] = np.mean(eval_rewards)
-        avg_metrics['eval_composite_score'] = np.mean(eval_composite_scores)
+        if eval_metrics:
+            all_keys = set()
+            for m in eval_metrics:
+                try:
+                    all_keys.update(m.keys())
+                except Exception:
+                    pass
+            for key in sorted(all_keys):
+                try:
+                    avg_metrics[f'eval_{key}'] = float(np.mean([m.get(key, 0.0) for m in eval_metrics]))
+                except Exception:
+                    # Fallback if any value is non-numeric
+                    avg_metrics[f'eval_{key}'] = 0.0
+        
+        if eval_rewards:
+            avg_metrics['eval_reward'] = float(np.mean(eval_rewards))
+        if eval_composite_scores:
+            avg_metrics['eval_composite_score'] = float(np.mean(eval_composite_scores))
         
         # Diagnostics: action distribution and trades
         total_actions = sum(action_counts.values())
@@ -420,7 +433,8 @@ class PPOTrainer:
     
     def __init__(self, config: PPOConfig, data_query: DataQuery, 
                  train_start_date: str = None, train_end_date: str = None,
-                 val_start_date: str = None, val_end_date: str = None):
+                 val_start_date: str = None, val_end_date: str = None,
+                 env_kwargs: Optional[dict] = None):
         
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -428,9 +442,20 @@ class PPOTrainer:
         # Initialize agent
         self.agent = PPOAgent(config, self.device)
         
+        # Extra environment configuration
+        self.env_kwargs = env_kwargs or {}
+
         # Initialize environments
-        self.train_env = GridTradingEnvironment(data_query, optimize_for_composite=self.config.optimize_for_composite)
-        self.val_env = GridTradingEnvironment(data_query, optimize_for_composite=self.config.optimize_for_composite)
+        self.train_env = GridTradingEnvironment(
+            data_query,
+            optimize_for_composite=self.config.optimize_for_composite,
+            **self.env_kwargs
+        )
+        self.val_env = GridTradingEnvironment(
+            data_query,
+            optimize_for_composite=self.config.optimize_for_composite,
+            **self.env_kwargs
+        )
         
         # Load data
         print("Loading training data...")
@@ -516,7 +541,7 @@ class PPOTrainer:
             self.agent.load_model(model_path)
             
         # Create test environment
-        test_env = GridTradingEnvironment(self.train_env.data_query)
+        test_env = GridTradingEnvironment(self.train_env.data_query, **(self.env_kwargs or {}))
         test_env.load_data(test_start_date, test_end_date)
         
         print("Running backtest...")
@@ -549,6 +574,42 @@ class PPOTrainer:
                     json.dump(trades, f, indent=2)
                 backtest_results['trades_file'] = trades_path
         except Exception as _:
+            pass
+
+        # Export equity curve and drawdowns with timestamps for plotting/reporting
+        try:
+            eq_curve = list(getattr(test_env.metrics, 'equity_curve', []) or [])
+            dd_curve = list(getattr(test_env.metrics, 'drawdowns', []) or [])
+            if eq_curve:
+                # Attempt to align timestamps from loaded data rows corresponding to equity updates
+                # Each env.step() appends one equity point; mapping starts at window_size index
+                dts = None
+                try:
+                    start_idx = int(getattr(test_env, 'window_size', 96))
+                    end_idx = min(start_idx + len(eq_curve), len(getattr(test_env, 'data', [])))
+                    if hasattr(test_env, 'data') and 'datetime' in test_env.data.columns and end_idx > start_idx:
+                        dts = test_env.data.iloc[start_idx:end_idx]['datetime'].astype(str).tolist()
+                except Exception:
+                    dts = None
+
+                # Save full time series to results file
+                os.makedirs('results', exist_ok=True)
+                ts2 = datetime.now().strftime('%Y%m%d_%H%M%S')
+                equity_path = os.path.join('results', f"backtest_equity_{ts2}.json")
+                payload = {
+                    'datetime': dts,
+                    'equity': eq_curve,
+                    'drawdown': dd_curve
+                }
+                with open(equity_path, 'w') as f:
+                    json.dump(payload, f, indent=2)
+                # Include short previews directly in results for quick inspection
+                backtest_results['equity_file'] = equity_path
+                backtest_results['equity_points'] = len(eq_curve)
+                if dts:
+                    backtest_results['equity_start'] = dts[0]
+                    backtest_results['equity_end'] = dts[-1]
+        except Exception:
             pass
         
         print("\n=== Backtest Results ===")

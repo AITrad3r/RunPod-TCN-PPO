@@ -1,0 +1,48 @@
+{
+  "history": [
+    {
+      "round": 1,
+      "train_composite": 0.46537141081362376,
+      "oos_composite": 0.48968346154087244,
+      "backtest_composite": 0.6985248178979925,
+      "backtest_win_rate": 0.4375,
+      "backtest_trades_per_day": 2.272189349112426,
+      "best_model_path": "checkpoints/best_model_episode_16.pt",
+      "oos_trades_file": "results\\oos_trades_20250814_070518.json",
+      "backtest_trades_file": "results\\backtest_trades_20250814_070519.json"
+    },
+    {
+      "round": 2,
+      "train_composite": 0.5658748426440936,
+      "oos_composite": 0.6607866233047054,
+      "backtest_composite": 0.30821680220106695,
+      "backtest_win_rate": 0.5333333333333333,
+      "backtest_trades_per_day": 2.130177514792899,
+      "best_model_path": "checkpoints/best_model_episode_4.pt",
+      "oos_trades_file": "results\\oos_trades_20250814_070643.json",
+      "backtest_trades_file": "results\\backtest_trades_20250814_070644.json"
+    },
+    {
+      "round": 3,
+      "train_composite": 0.0,
+      "oos_composite": 0.0,
+      "backtest_composite": 0.6995336852792524,
+      "backtest_win_rate": 0.5555555555555556,
+      "backtest_trades_per_day": 1.2781065088757395,
+      "best_model_path": "checkpoints/best_model_episode_4.pt",
+      "oos_trades_file": "results\\oos_trades_20250814_070814.json",
+      "backtest_trades_file": "results\\backtest_trades_20250814_070815.json"
+    }
+  ],
+  "final": {
+    "round": 3,
+    "train_composite": 0.0,
+    "oos_composite": 0.0,
+    "backtest_composite": 0.6995336852792524,
+    "backtest_win_rate": 0.5555555555555556,
+    "backtest_trades_per_day": 1.2781065088757395,
+    "best_model_path": "checkpoints/best_model_episode_4.pt",
+    "oos_trades_file": "results\\oos_trades_20250814_070814.json",
+    "backtest_trades_file": "results\\backtest_trades_20250814_070815.json"
+  }
+}
